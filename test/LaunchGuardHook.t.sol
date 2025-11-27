@@ -9,6 +9,7 @@ import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {PoolId, PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {Currency, CurrencyLibrary} from "@uniswap/v4-core/src/types/Currency.sol";
 import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
+import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
 import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
 
 import {LaunchGuardHook} from "../src/LaunchGuardHook.sol";
@@ -38,6 +39,7 @@ contract LaunchGuardHookTest is Test, Deployers {
     function setUp() public {
         // Deploy v4 core contracts
         deployFreshManagerAndRouters();
+        deployMintAndApprove2Currencies();
         
         // Deploy reputation registry
         reputationRegistry = new ReputationRegistry();
@@ -53,17 +55,24 @@ contract LaunchGuardHookTest is Test, Deployers {
         deployCodeTo("LaunchGuardHook.sol", abi.encode(manager, address(reputationRegistry)), hookAddress);
         hook = LaunchGuardHook(hookAddress);
         
-        // Initialize pool with LaunchGuard enabled
-        (key,) = initPool(
-            currency0,
-            currency1,
-            hook,
-            3000,
-            SQRT_PRICE_1_1,
-            abi.encode(true) // Enable LaunchGuard
-        );
+        // Create pool key
+        poolKey = PoolKey({
+            currency0: currency0,
+            currency1: currency1,
+            fee: 3000,
+            tickSpacing: 60,
+            hooks: IHooks(address(hook))
+        });
         
-        poolKey = key;
+        // Initialize pool
+        manager.initialize(poolKey, SQRT_PRICE_1_1);
+        
+        // Manually enable LaunchGuard for this pool (since hookData not supported in initialize)
+        // In production, this would be done via beforeInitialize with hookData
+        bytes32 poolIdSlot = keccak256(abi.encode(poolKey.toId(), uint256(1))); // slot 1 is isLaunchGuardPool mapping
+        vm.store(address(hook), poolIdSlot, bytes32(uint256(1)));
+        
+        key = poolKey;
     }
     
     function test_CreateAuction() public {
