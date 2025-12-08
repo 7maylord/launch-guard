@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.25;
+pragma solidity ^0.8.24;
 
 import {Test} from "forge-std/Test.sol";
 import {Deployers} from "./utils/Deployers.sol";
@@ -17,12 +17,13 @@ import {ReputationRegistry} from "../src/ReputationRegistry.sol";
 import {ILaunchGuard} from "../src/interface/ILaunchGuard.sol";
 
 import {FHE, InEuint128, euint128} from "@fhenixprotocol/cofhe-contracts/FHE.sol";
+import {CoFheTest} from "@fhenixprotocol/cofhe-foundry-mocks/CoFheTest.sol";
 
 /**
  * @title LaunchGuardHookTest
  * @notice Tests for LaunchGuard encrypted auction system
  */
-contract LaunchGuardHookTest is Test, Deployers {
+contract LaunchGuardHookTest is CoFheTest, Deployers {
     using PoolIdLibrary for PoolKey;
     using CurrencyLibrary for Currency;
     using FHE for euint128;
@@ -30,29 +31,35 @@ contract LaunchGuardHookTest is Test, Deployers {
     LaunchGuardHook hook;
     ReputationRegistry reputationRegistry;
     PoolKey poolKey;
-    
+
     address alice = makeAddr("alice");
     address bob = makeAddr("bob");
     address charlie = makeAddr("charlie");
     address poolCreator = makeAddr("poolCreator");
-    
+
+    constructor() CoFheTest(false) {}
+
     function setUp() public {
+        // CoFheTest is initialized in constructor, FHE mocks are ready
+
         // Deploy v4 core contracts
         deployFreshManagerAndRouters();
         deployMintAndApprove2Currencies();
         
         // Deploy reputation registry
         reputationRegistry = new ReputationRegistry();
-        
-        // Deploy hook
+
+        // Deploy hook to an address with correct flags
         uint160 flags = uint160(
             Hooks.BEFORE_INITIALIZE_FLAG |
             Hooks.BEFORE_ADD_LIQUIDITY_FLAG |
             Hooks.BEFORE_SWAP_FLAG
         );
-        
+
+        // Use deployCodeTo like Counter test - this works with FHE mocks
+        bytes memory constructorArgs = abi.encode(manager, address(reputationRegistry));
         address hookAddress = address(flags);
-        deployCodeTo("LaunchGuardHook.sol", abi.encode(manager, address(reputationRegistry)), hookAddress);
+        deployCodeTo("LaunchGuardHook.sol:LaunchGuardHook", constructorArgs, hookAddress);
         hook = LaunchGuardHook(hookAddress);
         
         // Create pool key

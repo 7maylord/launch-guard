@@ -431,11 +431,4 @@ if (require.main === module) {
     main().catch(console.error);
 }
 
-export {
-    initializeOperator,
-    startOperator,
-    stopOperator,
-    handleAuctionCreated,
-    handleBidSubmitted,
-    initiateSettlement
-};
+

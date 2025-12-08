@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.25;
+pragma solidity ^0.8.24;
 
 import {BaseHook} from "v4-periphery/src/utils/BaseHook.sol";
 import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
@@ -74,20 +74,17 @@ contract LaunchGuardHook is BaseHook, ILaunchGuard {
     
     /**
      * @notice Called before pool initialization
-     * @dev Used to enable LaunchGuard for specific pools
+     * @dev Automatically enables LaunchGuard for all pools using this hook
      */
     function _beforeInitialize(
         address,
         PoolKey calldata key,
-        uint160,
-        bytes calldata hookData
-    ) internal returns (bytes4) {
-        // Check if this pool should have LaunchGuard enabled
-        if (hookData.length > 0) {
-            isLaunchGuardPool[key.toId()] = true;
-            emit LaunchGuardEnabled(key.toId());
-        }
-        
+        uint160
+    ) internal override returns (bytes4) {
+        // Automatically enable LaunchGuard for any pool that uses this hook
+        isLaunchGuardPool[key.toId()] = true;
+        emit LaunchGuardEnabled(key.toId());
+
         return BaseHook.beforeInitialize.selector;
     }
     
