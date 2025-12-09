@@ -1,8 +1,9 @@
 import { useState } from 'react';
 import { Lock, Send, Loader2 } from 'lucide-react';
-import { useWallet } from '@/hooks/useWallet';
+import { useReownWallet } from '@/hooks/useReownWallet';
 import { FhenixService } from '@/lib/fhenix';
 import { Contract } from 'ethers';
+import { EncryptedAuctionABI } from '@/lib/abis';
 
 interface EncryptedBidFormProps {
   poolId: string;
@@ -10,7 +11,7 @@ interface EncryptedBidFormProps {
 }
 
 export function EncryptedBidForm({ poolId, contractAddress }: EncryptedBidFormProps) {
-  const { provider, isConnected } = useWallet();
+  const { provider, isConnected } = useReownWallet();
   const [amount, setAmount] = useState('');
   const [isEncrypting, setIsEncrypting] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -21,29 +22,41 @@ export function EncryptedBidForm({ poolId, contractAddress }: EncryptedBidFormPr
 
     try {
       setIsEncrypting(true);
-      
-      // 1. Initialize Fhenix Client
+
+      // 1. Initialize Fhenix Client (mocked on Sepolia)
       const client = await FhenixService.getInstance(provider);
-      
+
       // 2. Encrypt Amount
       const encryptedAmount = await client.encrypt(Number(amount), 'uint128');
       setIsEncrypting(false);
       setIsSubmitting(true);
 
       // 3. Submit Transaction
-      // Note: In a real app, you'd import the ABI
-      const abi = ['function submitBid(bytes32 poolId, bytes calldata encryptedAmount) external'];
       const signer = await provider.getSigner();
-      const contract = new Contract(contractAddress, abi, signer);
+      const contract = new Contract(contractAddress, EncryptedAuctionABI, signer);
 
-      const tx = await contract.submitBid(poolId, encryptedAmount.data);
+      // Get pool currencies from config
+      const { CONTRACTS } = await import('@/lib/config');
+
+      // Create PoolKey tuple (must be array, not object)
+      const poolKey = [
+        CONTRACTS.testPool.currency0,
+        CONTRACTS.testPool.currency1,
+        3000,
+        60,
+        CONTRACTS.launchGuardHook
+      ];
+
+      // encryptedAmount already contains the InEuint128 struct from FhenixService
+      const tx = await contract.submitBid(poolKey, encryptedAmount);
       await tx.wait();
 
-      alert('Bid submitted successfully!');
+      alert('Bid submitted successfully! 🎉');
       setAmount('');
-    } catch (error) {
+    } catch (error: any) {
       console.error('Error submitting bid:', error);
-      alert('Failed to submit bid');
+      const message = error?.reason || error?.message || 'Failed to submit bid';
+      alert(`Error: ${message}`);
     } finally {
       setIsEncrypting(false);
       setIsSubmitting(false);

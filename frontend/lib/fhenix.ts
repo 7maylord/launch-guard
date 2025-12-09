@@ -20,8 +20,15 @@ export class FhenixService {
         const client = {
           encrypt: async (amount: number, type: string) => {
             console.log('Mock encrypting:', amount, type);
+            // Return InEuint128-compatible struct for Sepolia testing
+            // In production with actual Fhenix, this would return real encrypted data
+            // Convert amount to integer to avoid decimal hex conversion
+            const amountInt = Math.floor(amount * 1e18); // Convert to wei as integer
             return {
-              data: '0x' + amount.toString(16).padStart(64, '0') // Mock encrypted data
+              ctHash: BigInt(amountInt), // Mock hash as BigInt
+              securityZone: 0, // Default security zone
+              utype: 7, // euint128 type identifier
+              signature: '0x' // Empty signature for mock
             };
           }
         };

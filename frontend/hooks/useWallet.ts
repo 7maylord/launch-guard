@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import { BrowserProvider, JsonRpcSigner } from 'ethers';
+import { CURRENT_NETWORK } from '../lib/config';
 
 export interface WalletState {
   address: string | null;
@@ -8,6 +9,7 @@ export interface WalletState {
   isConnecting: boolean;
   provider: BrowserProvider | null;
   signer: JsonRpcSigner | null;
+  isCorrectNetwork: boolean;
 }
 
 export function useWallet() {
@@ -18,6 +20,7 @@ export function useWallet() {
     isConnecting: true,
     provider: null,
     signer: null,
+    isCorrectNetwork: false,
   });
 
   const connect = useCallback(async () => {
@@ -34,13 +37,17 @@ export function useWallet() {
       const network = await provider.getNetwork();
       const signer = await provider.getSigner();
 
+      const chainId = Number(network.chainId);
+      const isCorrectNetwork = chainId === CURRENT_NETWORK.chainId;
+
       setState({
         address: accounts[0],
-        chainId: Number(network.chainId),
+        chainId,
         isConnected: true,
         isConnecting: false,
         provider,
         signer,
+        isCorrectNetwork,
       });
     } catch (error) {
       console.error('Failed to connect wallet:', error);
@@ -72,6 +79,7 @@ export function useWallet() {
             isConnecting: false,
             provider: null,
             signer: null,
+            isCorrectNetwork: false,
           });
         }
       });
@@ -80,5 +88,35 @@ export function useWallet() {
     }
   }, [connect]);
 
-  return { ...state, connect };
+  const switchToCorrectNetwork = useCallback(async () => {
+    if (!window.ethereum) return;
+
+    try {
+      await window.ethereum.request({
+        method: 'wallet_switchEthereumChain',
+        params: [{ chainId: `0x${CURRENT_NETWORK.chainId.toString(16)}` }],
+      });
+    } catch (error: any) {
+      // Chain doesn't exist, add it
+      if (error.code === 4902) {
+        try {
+          await window.ethereum.request({
+            method: 'wallet_addEthereumChain',
+            params: [{
+              chainId: `0x${CURRENT_NETWORK.chainId.toString(16)}`,
+              chainName: CURRENT_NETWORK.name,
+              rpcUrls: [CURRENT_NETWORK.rpcUrl],
+              blockExplorerUrls: CURRENT_NETWORK.explorerUrl ? [CURRENT_NETWORK.explorerUrl] : undefined,
+            }],
+          });
+        } catch (addError) {
+          console.error('Failed to add network:', addError);
+        }
+      } else {
+        console.error('Failed to switch network:', error);
+      }
+    }
+  }, []);
+
+  return { ...state, connect, switchToCorrectNetwork };
 }

@@ -5,6 +5,7 @@ import {FHE, InEuint128, euint128} from "@fhenixprotocol/cofhe-contracts/FHE.sol
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {ILaunchGuard} from "./interface/ILaunchGuard.sol";
 import {ReputationRegistry} from "./ReputationRegistry.sol";
+import {ILaunchGuardAVS} from "./avs/ILaunchGuardAVS.sol";
 
 /**
  * @title EncryptedAuction
@@ -18,25 +19,29 @@ contract EncryptedAuction {
     // ============ State Variables ============
     
     ReputationRegistry public immutable reputationRegistry;
-    
+    ILaunchGuardAVS public serviceManager;
+
     // Pool => Auction Config
     mapping(bytes32 => ILaunchGuard.AuctionConfig) public auctions;
-    
+
+    // Pool => AVS Task ID
+    mapping(bytes32 => uint32) public poolTaskIds;
+
     // Pool => Bidder => Bid
     mapping(bytes32 => mapping(address => ILaunchGuard.Bid)) public bids;
-    
+
     // Pool => Array of bidders
     mapping(bytes32 => address[]) public bidders;
-    
+
     // Pool => Bidder => Is Winner
     mapping(bytes32 => mapping(address => bool)) public winners;
-    
+
     // Pool => Winner allocations (decrypted amounts)
     mapping(bytes32 => mapping(address => uint256)) public allocations;
-    
-    // Authorized operators for settlement
+
+    // Authorized operators for settlement (legacy - now managed by AVS)
     mapping(address => bool) public authorizedOperators;
-    
+
     address public immutable owner;
     
     // ============ Events ============
@@ -84,7 +89,11 @@ contract EncryptedAuction {
     }
     
     modifier onlyAuthorizedOperator() {
-        if (!authorizedOperators[msg.sender]) revert NotAuthorized();
+        // Check both legacy authorization and AVS operator status
+        bool isLegacyOperator = authorizedOperators[msg.sender];
+        bool isAVSOperator = address(serviceManager) != address(0) && serviceManager.isOperator(msg.sender);
+
+        if (!isLegacyOperator && !isAVSOperator) revert NotAuthorized();
         _;
     }
     
@@ -99,16 +108,24 @@ contract EncryptedAuction {
     // ============ Admin Functions ============
     
     /**
-     * @notice Authorize an operator for settlement
+     * @notice Set the AVS Service Manager
+     * @param _serviceManager Address of LaunchGuardServiceManager
+     */
+    function setServiceManager(address _serviceManager) external onlyOwner {
+        serviceManager = ILaunchGuardAVS(_serviceManager);
+    }
+
+    /**
+     * @notice Authorize an operator for settlement (legacy)
      * @param operator Address to authorize
      */
     function authorizeOperator(address operator) external onlyOwner {
         authorizedOperators[operator] = true;
         emit OperatorAuthorized(operator);
     }
-    
+
     /**
-     * @notice Revoke operator authorization
+     * @notice Revoke operator authorization (legacy)
      * @param operator Address to revoke
      */
     function revokeOperator(address operator) external onlyOwner {
@@ -134,8 +151,11 @@ contract EncryptedAuction {
         uint256 maxWinners
     ) external onlyOwner {
         bytes32 poolId = _getPoolId(poolKey);
-        
-        if (auctions[poolId].isActive) revert AuctionAlreadyExists();
+
+        // Check if there's an active auction that hasn't ended yet
+        if (auctions[poolId].isActive && block.timestamp < auctions[poolId].auctionEndTime) {
+            revert AuctionAlreadyExists();
+        }
         if (auctionEndTime <= block.timestamp) revert InvalidConfiguration();
         if (maxWinners == 0) revert InvalidConfiguration();
         
@@ -187,7 +207,27 @@ contract EncryptedAuction {
         
         emit BidSubmitted(poolId, msg.sender, block.timestamp);
     }
-    
+
+    /**
+     * @notice Create AVS task for auction settlement
+     * @dev Can be called by anyone after auction ends to trigger AVS settlement
+     * @param poolKey The pool that needs settlement
+     */
+    function createSettlementTask(PoolKey calldata poolKey) external {
+        bytes32 poolId = _getPoolId(poolKey);
+        ILaunchGuard.AuctionConfig memory auction = auctions[poolId];
+
+        if (!auction.isActive) revert AuctionNotActive();
+        if (block.timestamp < auction.auctionEndTime) revert AuctionNotEnded();
+        if (poolTaskIds[poolId] != 0) revert(); // Task already created
+
+        // Create task in AVS
+        if (address(serviceManager) != address(0)) {
+            uint32 taskId = serviceManager.createTask(poolKey, bidders[poolId].length);
+            poolTaskIds[poolId] = taskId;
+        }
+    }
+
     /**
      * @notice Settle auction with decrypted winners
      * @dev Called by authorized operators after threshold decryption
@@ -211,7 +251,10 @@ contract EncryptedAuction {
             allocations[poolId][bidder] = winnerList[i].allocation;
             bids[poolId][bidder].isWinner = true;
         }
-        
+
+        // Mark auction as inactive so new auctions can be created
+        auctions[poolId].isActive = false;
+
         emit AuctionSettled(poolId, bidders[poolId].length, winnerList.length);
     }
     

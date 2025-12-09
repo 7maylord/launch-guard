@@ -14,10 +14,11 @@ export interface OperatorConfig {
     rpcUrl: string;
     privateKey: string;
     operatorId: number;
+    stakeAmount: bigint; // Amount to stake when registering as operator
     contractAddresses: {
-        launchGuard: string;
-        auction: string;
-        reputation: string;
+        serviceManager: string; // LaunchGuardServiceManager (AVS)
+        auction: string; // EncryptedAuction
+        reputation: string; // ReputationRegistry
     };
 }
 
@@ -26,13 +27,14 @@ export interface OperatorState {
     provider: ethers.Provider;
     wallet: ethers.Wallet;
     contracts: {
-        launchGuard: ethers.Contract;
-        auction: ethers.Contract;
-        reputation: ethers.Contract;
+        serviceManager: ethers.Contract; // LaunchGuardServiceManager
+        auction: ethers.Contract; // EncryptedAuction
+        reputation: ethers.Contract; // ReputationRegistry
     };
     decryptor: FHEDecryptor.DecryptorConfig;
     consensus: Consensus.ConsensusState;
     reputation: ReputationMonitor.ReputationState;
+    isRegistered: boolean; // Whether operator is registered with AVS
     isRunning: boolean;
 }
 
@@ -43,8 +45,9 @@ export const createOperatorConfig = (
     rpcUrl: string,
     privateKey: string,
     operatorId: number,
+    stakeAmount: bigint,
     contractAddresses: {
-        launchGuard: string;
+        serviceManager: string;
         auction: string;
         reputation: string;
     }
@@ -52,6 +55,7 @@ export const createOperatorConfig = (
     rpcUrl,
     privateKey,
     operatorId,
+    stakeAmount,
     contractAddresses
 });
 
@@ -61,15 +65,15 @@ export const createOperatorConfig = (
 export const initializeOperator = (config: OperatorConfig): OperatorState => {
     const provider = new ethers.JsonRpcProvider(config.rpcUrl);
     const wallet = new ethers.Wallet(config.privateKey, provider);
-    
-    const launchGuardABI = getLaunchGuardABI();
+
+    const serviceManagerABI = getServiceManagerABI();
     const auctionABI = getAuctionABI();
     const reputationABI = getReputationABI();
-    
+
     const contracts = {
-        launchGuard: new ethers.Contract(
-            config.contractAddresses.launchGuard,
-            launchGuardABI,
+        serviceManager: new ethers.Contract(
+            config.contractAddresses.serviceManager,
+            serviceManagerABI,
             wallet
         ),
         auction: new ethers.Contract(
@@ -83,14 +87,14 @@ export const initializeOperator = (config: OperatorConfig): OperatorState => {
             wallet
         )
     };
-    
+
     const decryptor = FHEDecryptor.createDecryptor(provider, config.operatorId);
     const consensus = Consensus.createConsensusState(config.operatorId);
     const reputation = ReputationMonitor.createReputationState(config.operatorId);
-    
-    console.log(`LaunchGuard Operator ${config.operatorId} initialized`);
+
+    console.log(`LaunchGuard AVS Operator ${config.operatorId} initialized`);
     console.log(`Wallet: ${wallet.address}`);
-    
+
     return {
         config,
         provider,
@@ -99,56 +103,120 @@ export const initializeOperator = (config: OperatorConfig): OperatorState => {
         decryptor,
         consensus,
         reputation,
+        isRegistered: false,
         isRunning: false
     };
 };
 
 /**
- * Set up event listeners
+ * Register operator with AVS
+ */
+export const registerOperator = async (state: OperatorState): Promise<OperatorState> => {
+    console.log(`Registering operator with stake: ${ethers.formatEther(state.config.stakeAmount)} ETH`);
+
+    try {
+        // Check if already registered
+        const isOperator = await state.contracts.serviceManager.isOperator(state.wallet.address);
+        if (isOperator) {
+            console.log('✅ Already registered as operator');
+            return { ...state, isRegistered: true };
+        }
+
+        // Register with stake
+        const tx = await state.contracts.serviceManager.registerOperator({
+            value: state.config.stakeAmount
+        });
+
+        console.log(`Registration transaction: ${tx.hash}`);
+        await tx.wait();
+
+        console.log('✅ Successfully registered as AVS operator');
+        return { ...state, isRegistered: true };
+    } catch (error) {
+        console.error('❌ Failed to register operator:', error);
+        throw error;
+    }
+};
+
+/**
+ * Set up event listeners for AVS tasks
  */
 export const setupEventListeners = (
     state: OperatorState,
     handlers: {
-        onAuctionCreated: (poolId: string, endTime: bigint) => Promise<void>;
+        onTaskCreated: (taskId: number, poolId: string, totalBidders: number) => Promise<void>;
         onBidSubmitted: (poolId: string, bidder: string) => Promise<void>;
         onAuctionSettled: (poolId: string, totalBids: number, winnersCount: number) => void;
     }
 ): OperatorState => {
-    state.contracts.auction.on('AuctionCreated', async (poolId, endTime, ...args) => {
-        console.log(`New auction created for pool ${poolId}`);
-        await handlers.onAuctionCreated(poolId, endTime);
+    // Listen for AVS task creation
+    state.contracts.serviceManager.on('TaskCreated', async (taskId, poolId, totalBidders) => {
+        console.log(`\n🎯 New AVS Task #${taskId} created for pool ${poolId}`);
+        console.log(`Total bidders: ${totalBidders}`);
+        await handlers.onTaskCreated(taskId, poolId, totalBidders);
     });
-    
+
+    // Listen for bid submissions
     state.contracts.auction.on('BidSubmitted', async (poolId, bidder, timestamp) => {
         console.log(`New bid from ${bidder} for pool ${poolId}`);
         await handlers.onBidSubmitted(poolId, bidder);
     });
-    
-    state.contracts.launchGuard.on('AuctionSettled', async (poolId, totalBids, winnersCount) => {
-        console.log(`Auction settled for pool ${poolId}: ${winnersCount} winners`);
+
+    // Listen for auction settlements
+    state.contracts.auction.on('AuctionSettled', async (poolId, totalBids, winnersCount) => {
+        console.log(`✅ Auction settled for pool ${poolId}: ${winnersCount} winners`);
         handlers.onAuctionSettled(poolId, totalBids, winnersCount);
     });
-    
+
     return state;
 };
 
 /**
- * Handle auction creation
+ * Handle AVS task creation
  */
-export const handleAuctionCreated = async (
+export const handleTaskCreated = async (
     state: OperatorState,
+    taskId: number,
     poolId: string,
-    endTime: bigint
+    totalBidders: number
 ): Promise<void> => {
-    console.log(`Monitoring auction ${poolId} until ${new Date(Number(endTime) * 1000)}`);
-    
-    const now = Math.floor(Date.now() / 1000);
-    const timeUntilEnd = Number(endTime) - now;
-    
-    if (timeUntilEnd > 0) {
-        setTimeout(() => {
-            initiateSettlement(state, poolId);
-        }, timeUntilEnd * 1000 + 5000);
+    console.log(`\n📋 Processing AVS Task #${taskId}`);
+    console.log(`Pool: ${poolId}`);
+    console.log(`Total bidders: ${totalBidders}`);
+
+    try {
+        // Step 1: Get all bids for this pool
+        const bids = await getBidsForPool(state, poolId);
+        console.log(`Retrieved ${bids.length} encrypted bids`);
+
+        // Step 2: Decrypt bids using threshold FHE
+        const decryptedBids = await decryptBids(state, poolId, bids);
+        console.log(`Decrypted ${decryptedBids.length} bids`);
+
+        // Step 3: Rank bids and select winners
+        const auctionConfig = await getAuctionConfig(state, poolId);
+        const winners = Consensus.rankBids(decryptedBids, auctionConfig.maxWinners);
+        console.log(`Selected ${winners.length} winners`);
+
+        // Step 4: Compute winnersRoot for consensus
+        const winnersArray = winners.map(w => ({
+            bidder: w.bidder,
+            amount: w.amount,
+            allocation: BigInt(w.allocation) // Convert to bigint for contract
+        }));
+        const winnersRoot = ethers.keccak256(ethers.AbiCoder.defaultAbiCoder().encode(
+            ['tuple(address bidder, uint256 amount, uint256 allocation)[]'],
+            [winnersArray]
+        ));
+
+        console.log(`Winners root: ${winnersRoot}`);
+
+        // Step 5: Submit response to AVS
+        await respondToTask(state, taskId, winnersArray, winnersRoot);
+
+        console.log(`✅ Task #${taskId} response submitted`);
+    } catch (error) {
+        console.error(`❌ Failed to process task #${taskId}:`, error);
     }
 };
 
@@ -182,52 +250,38 @@ export const handleBidSubmitted = async (
 };
 
 /**
- * Initiate settlement for an auction
+ * Respond to AVS task with decrypted winners
  */
-export const initiateSettlement = async (
+export const respondToTask = async (
     state: OperatorState,
-    poolId: string
-): Promise<OperatorState> => {
-    console.log(`\n🎯 Initiating settlement for pool ${poolId}`);
-    
+    taskId: number,
+    winners: { bidder: string; amount: bigint; allocation: bigint }[],
+    winnersRoot: string
+): Promise<void> => {
+    console.log(`\n📤 Submitting response to Task #${taskId}...`);
+
     try {
-        // Step 1: Get all bids
-        const bids = await getBidsForPool(state, poolId);
-        console.log(`Found ${bids.length} bids`);
-        
-        // Step 2: Decrypt bids
-        const decryptedBids = await decryptBids(state, poolId, bids);
-        console.log(`Decrypted ${decryptedBids.length} bids`);
-        
-        // Step 3: Rank bids and select winners
-        const auctionConfig = await getAuctionConfig(state, poolId);
-        const winners = Consensus.rankBids(decryptedBids, auctionConfig.maxWinners);
-        console.log(`Selected ${winners.length} winners`);
-        
-        // Step 4: Propose settlement
-        const proposal = Consensus.proposeSettlement(state.consensus, poolId, winners);
-        
-        // Step 5: Vote on proposal
-        const [newConsensus, vote] = Consensus.voteOnProposal(state.consensus, proposal, true);
-        
-        // Step 6: Check consensus
-        console.log('Waiting for consensus from other operators...');
-        await sleep(5000);
-        
-        const newState = { ...state, consensus: newConsensus };
-        
-        // Step 7: Submit if consensus reached
-        if (Consensus.hasReachedConsensus(newConsensus, proposal.hash)) {
-            await submitSettlement(newState, poolId, winners);
-            console.log('✅ Settlement submitted successfully');
+        const tx = await state.contracts.serviceManager.respondToTask(
+            taskId,
+            winners,
+            winnersRoot
+        );
+
+        console.log(`Response transaction: ${tx.hash}`);
+        await tx.wait();
+
+        console.log(`✅ Response submitted for Task #${taskId}`);
+
+        // Check if quorum is reached
+        const hasQuorum = await state.contracts.serviceManager.hasReachedQuorum(taskId);
+        if (hasQuorum) {
+            console.log(`🎉 Quorum reached for Task #${taskId}! Settlement will be finalized.`);
         } else {
-            console.log('❌ Consensus not reached');
+            console.log(`⏳ Waiting for more operator responses to reach quorum...`);
         }
-        
-        return newState;
     } catch (error) {
-        console.error('Settlement failed:', error);
-        return state;
+        console.error(`❌ Failed to submit response:`, error);
+        throw error;
     }
 };
 
@@ -268,28 +322,6 @@ export const decryptBids = async (
     return results.filter((bid): bid is Consensus.BidData => bid !== null);
 };
 
-/**
- * Submit settlement transaction
- */
-export const submitSettlement = async (
-    state: OperatorState,
-    poolId: string,
-    winners: Consensus.WinnerProposal[]
-): Promise<void> => {
-    console.log(`Submitting settlement for pool ${poolId}...`);
-    
-    const winnersArray = winners.map(w => ({
-        bidder: w.bidder,
-        amount: w.amount,
-        allocation: w.allocation
-    }));
-    
-    console.log('Settlement data:', { poolId, winners: winnersArray });
-    
-    // In production: Submit actual transaction
-    // const tx = await state.contracts.launchGuard.settleAuction(poolId, winnersArray);
-    // await tx.wait();
-};
 
 /**
  * Update reputation scores
@@ -329,30 +361,37 @@ export const monitoringLoop = async (
  * Start the operator
  */
 export const startOperator = async (state: OperatorState): Promise<OperatorState> => {
-    console.log(`Starting operator ${state.config.operatorId}...`);
-    
-    const runningState = { ...state, isRunning: true };
-    
+    console.log(`\n🚀 Starting LaunchGuard AVS Operator ${state.config.operatorId}...`);
+
+    // Step 1: Register with AVS
+    let registeredState = state;
+    if (!state.isRegistered) {
+        registeredState = await registerOperator(state);
+    }
+
+    const runningState = { ...registeredState, isRunning: true };
+
+    // Step 2: Set up event listeners
     const handlers = {
-        onAuctionCreated: (poolId: string, endTime: bigint) => 
-            handleAuctionCreated(runningState, poolId, endTime),
+        onTaskCreated: (taskId: number, poolId: string, totalBidders: number) =>
+            handleTaskCreated(runningState, taskId, poolId, totalBidders),
         onBidSubmitted: async (poolId: string, bidder: string) => {
             const newState = await handleBidSubmitted(runningState, poolId, bidder);
             Object.assign(runningState, newState);
         },
         onAuctionSettled: (poolId: string, totalBids: number, winnersCount: number) => {
-            console.log(`Auction ${poolId} settled`);
+            console.log(`✅ Auction ${poolId} settled with ${winnersCount} winners`);
         }
     };
-    
+
     setupEventListeners(runningState, handlers);
-    
-    // Start monitoring loop
+
+    // Step 3: Start monitoring loop
     monitoringLoop(runningState, async (s) => {
-        // Check pending auctions
+        // Monitor for pending tasks
     });
-    
-    console.log(`Operator ${state.config.operatorId} is running`);
+
+    console.log(`\n✅ Operator ${state.config.operatorId} is running and listening for tasks...`);
     return runningState;
 };
 
@@ -360,13 +399,13 @@ export const startOperator = async (state: OperatorState): Promise<OperatorState
  * Stop the operator
  */
 export const stopOperator = (state: OperatorState): OperatorState => {
-    console.log(`Stopping operator ${state.config.operatorId}...`);
-    
-    state.contracts.launchGuard.removeAllListeners();
+    console.log(`\n🛑 Stopping operator ${state.config.operatorId}...`);
+
+    state.contracts.serviceManager.removeAllListeners();
     state.contracts.auction.removeAllListeners();
-    
-    console.log(`Operator ${state.config.operatorId} stopped`);
-    
+
+    console.log(`✅ Operator ${state.config.operatorId} stopped`);
+
     return { ...state, isRunning: false };
 };
 
@@ -382,48 +421,85 @@ const getAuctionConfig = async (state: OperatorState, poolId: string): Promise<a
     return { maxWinners: 10 };
 };
 
-const sleep = (ms: number): Promise<void> => 
+const sleep = (ms: number): Promise<void> =>
     new Promise(resolve => setTimeout(resolve, ms));
 
-const getLaunchGuardABI = (): any[] => [
-    'event AuctionCreated(bytes32 indexed poolId, uint256 auctionEndTime, uint256 priorityWindowDuration, uint256 minBidAmount, uint256 maxWinners)',
-    'event AuctionSettled(bytes32 indexed poolId, uint256 totalBids, uint256 winnersCount)',
-    'function settleAuction(bytes32 poolId, tuple(address bidder, uint256 amount, uint256 allocation)[] winners)'
+const getServiceManagerABI = (): any[] => [
+    // Operator management
+    'function registerOperator() payable',
+    'function deregisterOperator()',
+    'function isOperator(address) view returns (bool)',
+    'function getOperatorInfo(address) view returns (tuple(address operatorAddress, bool isActive, uint256 stake, uint256 taskResponses, uint256 slashedAmount))',
+
+    // Task management
+    'event TaskCreated(uint32 indexed taskId, bytes32 indexed poolId, uint256 totalBidders)',
+    'event TaskResponded(uint32 indexed taskId, address indexed operator, bytes32 winnersRoot)',
+    'event TaskCompleted(uint32 indexed taskId, bytes32 indexed poolId, uint256 winnersCount)',
+    'function respondToTask(uint32 taskId, tuple(address bidder, uint256 amount, uint256 allocation)[] winners, bytes32 winnersRoot)',
+    'function hasReachedQuorum(uint32 taskId) view returns (bool)',
+    'function getTask(uint32 taskId) view returns (tuple(uint32 taskId, bytes32 poolId, uint256 auctionEndTime, uint256 totalBidders, uint32 taskCreatedBlock, uint8 quorumThresholdPercentage))',
+
+    // Events
+    'event OperatorRegistered(address indexed operator, uint256 stake)',
+    'event OperatorDeregistered(address indexed operator)',
+    'event OperatorSlashed(address indexed operator, uint256 amount, string reason)'
 ];
 
 const getAuctionABI = (): any[] => [
     'event AuctionCreated(bytes32 indexed poolId, uint256 auctionEndTime, uint256 priorityWindowDuration, uint256 minBidAmount, uint256 maxWinners)',
-    'event BidSubmitted(bytes32 indexed poolId, address indexed bidder, uint256 timestamp)'
+    'event BidSubmitted(bytes32 indexed poolId, address indexed bidder, uint256 timestamp)',
+    'event AuctionSettled(bytes32 indexed poolId, uint256 totalBids, uint256 winnersCount)',
+    'function getBidders(tuple(address,address,uint24,int24,address)) view returns (address[])',
+    'function getBid(tuple(address,address,uint24,int24,address), address) view returns (tuple(address bidder, uint256 encryptedAmount, uint256 timestamp, bool isWinner, bool hasExecuted))',
+    'function getAuctionConfig(tuple(address,address,uint24,int24,address)) view returns (tuple(uint256 auctionEndTime, uint256 priorityWindowDuration, uint256 minBidAmount, uint256 maxWinners, bool isActive))'
 ];
 
 const getReputationABI = (): any[] => [
     'function blacklist(address user, string reason)',
-    'function addCommunityMember(address user)'
+    'function addCommunityMember(address user)',
+    'function canParticipate(address) view returns (bool)',
+    'function isBlacklisted(address) view returns (bool)'
 ];
 
 // ============ Main Entry Point ============
 
 const main = async () => {
+    console.log('╔═══════════════════════════════════════════════╗');
+    console.log('║   LaunchGuard AVS Operator - EigenLayer      ║');
+    console.log('╚═══════════════════════════════════════════════╝\n');
+
     const config = createOperatorConfig(
         process.env.RPC_URL || 'http://localhost:8545',
         process.env.PRIVATE_KEY || '',
         parseInt(process.env.OPERATOR_ID || '0'),
+        ethers.parseEther(process.env.STAKE_AMOUNT || '2'), // Default 2 ETH stake
         {
-            launchGuard: process.env.LAUNCHGUARD_ADDRESS || '',
+            serviceManager: process.env.SERVICE_MANAGER_ADDRESS || '',
             auction: process.env.AUCTION_ADDRESS || '',
             reputation: process.env.REPUTATION_ADDRESS || ''
         }
     );
-    
+
+    console.log('Configuration:');
+    console.log(`  RPC URL: ${config.rpcUrl}`);
+    console.log(`  Operator ID: ${config.operatorId}`);
+    console.log(`  Stake: ${ethers.formatEther(config.stakeAmount)} ETH`);
+    console.log(`  Service Manager: ${config.contractAddresses.serviceManager}`);
+    console.log(`  Auction: ${config.contractAddresses.auction}`);
+    console.log(`  Reputation: ${config.contractAddresses.reputation}\n`);
+
     let state = initializeOperator(config);
     state = await startOperator(state);
-    
+
     // Handle graceful shutdown
     process.on('SIGINT', () => {
-        console.log('\nShutting down...');
+        console.log('\n\n🛑 Received shutdown signal...');
         state = stopOperator(state);
         process.exit(0);
     });
+
+    // Keep process alive
+    await new Promise(() => {});
 };
 
 // Run if called directly

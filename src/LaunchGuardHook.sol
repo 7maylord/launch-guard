@@ -285,4 +285,13 @@ contract LaunchGuardHook is BaseHook, ILaunchGuard {
     function getReputationRegistry() external view returns (address) {
         return address(reputationRegistry);
     }
+
+    /**
+     * @notice Configure the AVS Service Manager
+     * @dev Only the auction owner can call this (which is this hook contract)
+     * @param serviceManager Address of the LaunchGuardServiceManager
+     */
+    function setServiceManager(address serviceManager) external {
+        auction.setServiceManager(serviceManager);
+    }
 }
